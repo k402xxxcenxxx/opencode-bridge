@@ -1,0 +1,14 @@
+{
+  "name": "opencode-bridge",
+  "version": "1.0.0",
+  "description": "Bridge between OpenCode CLI and LLM chat web pages",
+  "main": "bridge-server.js",
+  "scripts": {
+    "start": "node bridge-server.js",
+    "install-browsers": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "playwright": "^1.42.0"
+  }
+}

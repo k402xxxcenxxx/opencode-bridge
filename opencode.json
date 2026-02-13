@@ -1,0 +1,9 @@
+{
+  "provider": {
+    "name": "openai-compatible",
+    "apiKey": "bridge-no-key-needed",
+    "baseUrl": "http://127.0.0.1:5100/v1"
+  },
+  "model": "bridge-llm",
+  "stream": true
+}
