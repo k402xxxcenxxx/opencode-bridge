@@ -340,40 +340,121 @@ class ConversationManager {
     return null;
   }
 
-  // ─── Truncation Detection ────────────────────────────────
+  // ─── Truncation Detection (EN / zh-TW / zh-CN) ──────────────────────────
   _detectTruncation(response) {
     const trimmed = response.trim();
     if (trimmed.length === 0) return { isTruncated: false, reason: null };
 
+    // ─── 1. Structural: Unclosed code blocks (language-agnostic) ─────────
     const codeBlockCount = (trimmed.match(/```/g) || []).length;
     if (codeBlockCount % 2 !== 0) {
       return { isTruncated: true, reason: "Unclosed code block" };
     }
 
-    // Check for unclosed [[WRITE_FILE:]] blocks
-    const writeStarts = (trimmed.match(/\[\[WRITE_FILE:/gi) || []).length;
-    const writeEnds = (trimmed.match(/\[\[END_FILE\]\]/gi) || []).length;
+    // ─── 2. Structural: Unclosed [[WRITE_FILE:]] blocks ──────────────────
+    const writeStarts = (trimmed.match(/$$\[WRITE_FILE:/gi) || []).length;
+    const writeEnds   = (trimmed.match(/\[\[END_FILE$$\]/gi) || []).length;
     if (writeStarts > writeEnds) {
-      console.log(`${trimmed}`);
-      console.log(`[Manager] Detected ${writeStarts} [[WRITE_FILE:]] starts but only ${writeEnds} [[END_FILE]] ends.`);
+      console.log(trimmed);
+      console.log(
+        `[Manager] Detected ${writeStarts} [[WRITE_FILE:]] starts ` +
+        `but only ${writeEnds} [[END_FILE]] ends.`
+      );
       return { isTruncated: true, reason: "Unclosed [[WRITE_FILE]] block" };
     }
 
-    const lower = trimmed.toLowerCase();
-    const continuationSignals = [
-      "let me continue", "i'll continue", "continuing from",
-      "in the next part", "to be continued", "[continued]",
-      "i'll provide the rest",
+    // ─── 3. Structural: Unclosed CJK bracket / quotation pairs ──────────
+    const cjkPairs = [
+      ["\u300c", "\u300d"],  // 「 」 — primary CJK quotation
+      ["\u300e", "\u300f"],  // 『 』 — secondary CJK quotation
+      ["\u3010", "\u3011"],  // 【 】 — lenticular brackets
+      ["\u300a", "\u300b"],  // 《 》 — double angle brackets
+      ["\uff08", "\uff09"],  // （ ） — fullwidth parentheses
     ];
+    for (const [open, close] of cjkPairs) {
+      const opens  = trimmed.split(open).length - 1;
+      const closes = trimmed.split(close).length - 1;
+      if (opens > closes) {
+        return {
+          isTruncated: true,
+          reason: `Unclosed CJK bracket pair: ${open}…${close} `
+                + `(opened ${opens}, closed ${closes})`,
+        };
+      }
+    }
+
+    // ─── 4. Continuation signals (EN / zh-CN / zh-TW) ───────────────────
+    //   Chinese characters are case-insensitive by nature, so a single
+    //   toLowerCase() pass covers all three languages safely.
+    const lower = trimmed.toLowerCase();
+
+    const continuationSignals = [
+      // ── English ──
+      "let me continue",      "i'll continue",
+      "i will continue",      "continuing from",
+      "in the next part",     "to be continued",
+      "[continued]",          "i'll provide the rest",
+      "continued in part",    "see next message",
+
+      // ── Simplified Chinese ──
+      "让我继续",   "我会继续",    "我将继续",
+      "接下来继续", "继续提供",    "未完待续",
+      "待续",       "以下是剩余",  "下面继续",
+      "请看下文",   "后续部分",    "篇幅限制",
+      "字数限制",   "由于长度",
+
+      // ── Traditional Chinese ──
+      "讓我繼續",   "我會繼續",    "我將繼續",
+      "接下來繼續", "繼續提供",    "未完待續",
+      "待續",       "以下是剩餘",  "下面繼續",
+      "請看下文",   "後續部分",    "篇幅限制",
+      "字數限制",   "由於長度",
+    ];
+
     for (const signal of continuationSignals) {
       if (lower.includes(signal)) {
         return { isTruncated: true, reason: `Continuation signal: "${signal}"` };
       }
     }
 
+    // ─── 5. Mid-sentence termination (multi-script aware) ────────────────
     const lastChar = trimmed.slice(-1);
-    const terminators = new Set([".", "!", "?", "`", '"', "'", ")", "]", "}", ">", "|", "-"]);
-    if (trimmed.length > 300 && !terminators.has(lastChar)) {
+
+    const terminators = new Set([
+      // ASCII
+      ".", "!", "?", "`", '"', "'", ")", "]", "}", ">", "|", "-",
+
+      // CJK sentence-final punctuation
+      "\u3002",   // 。 — ideographic full stop
+      "\uff01",   // ！ — fullwidth exclamation
+      "\uff1f",   // ？ — fullwidth question mark
+
+      // CJK closing brackets / quotes (mirrors the pairs above)
+      "\u300d",   // 」
+      "\u300f",   // 』
+      "\u3011",   // 】
+      "\u300b",   // 》
+      "\uff09",   // ）
+
+      // Fullwidth sentence-ending variants
+      "\uff0e",   // ．
+      "\uff1b",   // ；
+      "\uff1a",   // ：
+
+      // Ellipsis (common valid ending in all three languages)
+      "\u2026",   // … — horizontal ellipsis
+      "\u22ef",   // ⋯ — midline horizontal ellipsis
+    ]);
+
+    // CJK-heavy text carries more meaning per character,
+    // so apply a lower threshold when the text is predominantly CJK.
+    // Range U+4E00–U+9FFF covers CJK Unified Ideographs (both SC & TC).
+    // Range U+3400–U+4DBF covers CJK Extension A.
+    const cjkCount = (trimmed.match(/[\u3400-\u9fff]/g) || []).length;
+    const cjkRatio = cjkCount / trimmed.length;
+    const minLength = cjkRatio > 0.3 ? 100 : 300;
+
+    if (trimmed.length > minLength && !terminators.has(lastChar)) {
       return { isTruncated: true, reason: "Response ends mid-sentence" };
     }
 
