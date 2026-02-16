@@ -1,5 +1,14 @@
 // conversation-manager.js
+"use strict";
+
 const config = require("./config");
+const {
+  extractFileBlocks,
+  extractToolCallBlocks,
+  stripAllMarkers,
+  fileBlocksToToolCalls,
+  toOpenAIToolCalls,
+} = require("./file-block-parser");
 
 // ─── Meta-prompt templates ─────────────────────────────────
 const META = {
@@ -25,17 +34,48 @@ const META = {
   continuePrompt:
     "Your previous response was cut off. Continue EXACTLY where you stopped — " +
     "do not repeat, summarize, or restart. Begin with the next character/word.",
+
+  // ─── Tool usage instructions appended to system prompt ───
+  toolInstructions: (availableTools) => {
+    if (!availableTools || availableTools.length === 0) return "";
+
+    const toolList = availableTools.map((t) => {
+      const fn = t.function || t;
+      const params = fn.parameters
+        ? JSON.stringify(fn.parameters, null, 2)
+        : "{}";
+      return `- **${fn.name}**: ${fn.description || "No description"}\n  Parameters: ${params}`;
+    }).join("\n");
+
+    return (
+      `\n\n---\n` +
+      `IMPORTANT — FILE AND TOOL OUTPUT FORMAT:\n` +
+      `You have access to the following tools. When you need to use them, ` +
+      `output the tool invocation using the EXACT formats below.\n\n` +
+      `DO NOT use <file> or </file> HTML-style tags — they break in this environment.\n\n` +
+      `**To write/create a file**, use this format (double square brackets, NOT angle brackets):\n\n` +
+      `[[WRITE_FILE: path/to/filename.ext]]\n` +
+      `file content here exactly as it should be saved\n` +
+      `[[END_FILE]]\n\n` +
+      `**To invoke any other tool**, use this format:\n\n` +
+      `[[TOOL_CALL]]\n` +
+      `{"name": "tool_name", "arguments": {"param": "value"}}\n` +
+      `[[/TOOL_CALL]]\n\n` +
+      `Available tools:\n${toolList}\n\n` +
+      `RULES:\n` +
+      `1. Always use [[WRITE_FILE: ...]] / [[END_FILE]] for file creation — NEVER <file> tags.\n` +
+      `2. Always use [[TOOL_CALL]] / [[/TOOL_CALL]] for other tool invocations.\n` +
+      `3. File content must be COMPLETE — no placeholders, no truncation, no "// rest of code".\n` +
+      `4. You may include normal conversational text alongside tool blocks.\n` +
+      `5. Multiple file writes in one response are fine.\n` +
+      `---\n\n`
+    );
+  },
 };
 
 // ─── Utility Request Interceptors ──────────────────────────
-// OpenCode sends internal requests (title generation, summaries,
-// etc.) through the same chat completions endpoint. We intercept
-// these so they never reach the browser conversation.
-// ────────────────────────────────────────────────────────────
-
 const INTERCEPTORS = [
   {
-    // ── Title Generation ───────────────────────────────
     name: "title-generation",
     detect: (systemPrompt, _userMessage) => {
       if (!systemPrompt) return false;
@@ -49,32 +89,24 @@ const INTERCEPTORS = [
       );
     },
     handle: (_systemPrompt, userMessage) => {
-      // Extract meaningful text from the user message
-      // OpenCode often wraps it in <text>...</text> tags
       let text = userMessage;
       const textMatch = text.match(/<text>\s*([\s\S]*?)\s*<\/text>/i);
       if (textMatch) text = textMatch[1];
-
-      // Strip markdown, tool references, file paths for a clean title
       text = text
-        .replace(/```[\s\S]*?```/g, "code")       // code blocks → "code"
-        .replace(/`[^`]+`/g, "")                    // inline code
-        .replace(/@[\w/.:-]+/g, "")                 // @file references
-        .replace(/https?:\/\/\S+/g, "")             // URLs
-        .replace(/[#*_~>\[\](){}|]/g, "")           // markdown chars
-        .replace(/\s+/g, " ")                       // collapse whitespace
+        .replace(/```[\s\S]*?```/g, "code")
+        .replace(/`[^`]+`/g, "")
+        .replace(/@[\w/.:-]+/g, "")
+        .replace(/https?:\/\/\S+/g, "")
+        .replace(/[#*_~>$$\](){}|]/g, "")
+        .replace(/\s+/g, " ")
         .trim();
-
       if (!text || text.length < 2) return "New conversation";
-
-      // Truncate and capitalize
       const words = text.split(" ").slice(0, 7).join(" ");
       const title = words.length > 50 ? words.substring(0, 47) + "..." : words;
       return title.charAt(0).toUpperCase() + title.slice(1);
     },
   },
   {
-    // ── Summarization Requests ─────────────────────────
     name: "summarization",
     detect: (systemPrompt, _userMessage) => {
       if (!systemPrompt) return false;
@@ -88,17 +120,13 @@ const INTERCEPTORS = [
       );
     },
     handle: (_systemPrompt, userMessage) => {
-      const text = userMessage
-        .replace(/<[^>]+>/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
+      const text = userMessage.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
       const sentences = text.split(/[.!?]+/).filter((s) => s.trim().length > 5);
       if (sentences.length === 0) return "General conversation.";
       return sentences.slice(0, 3).join(". ").trim() + ".";
     },
   },
   {
-    // ── Commit Message Generation ──────────────────────
     name: "commit-message",
     detect: (systemPrompt, _userMessage) => {
       if (!systemPrompt) return false;
@@ -109,11 +137,7 @@ const INTERCEPTORS = [
       );
     },
     handle: (_systemPrompt, userMessage) => {
-      // Return a reasonable commit message from the diff/description
-      const text = userMessage
-        .replace(/```[\s\S]*?```/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
+      const text = userMessage.replace(/```[\s\S]*?```/g, "").replace(/\s+/g, " ").trim();
       if (text.length < 10) return "chore: update files";
       const summary = text.substring(0, 72);
       return `chore: ${summary}`;
@@ -129,48 +153,58 @@ class ConversationManager {
     this.sentTurnCount = 0;
     this.currentSystemPrompt = null;
     this.systemPromptSent = false;
+    this.currentTools = [];          // Tools from latest request
+    this.toolInstructionsSent = false;
   }
 
   /**
-   * Main entry point: process an OpenAI-compatible chat completion request.
+   * Main entry point.
    *
-   * @param {Array} messages - OpenAI-format messages array
-   * @param {Object} options - reserved for future use
-   * @returns {string} Final response
+   * @param {Array} messages  - OpenAI-format messages array
+   * @param {Object} options  - { tools, tool_choice, ... } from the request body
+   * @returns {Object} { kind, content, tool_calls } — bridge-server uses `kind` to decide response format
    */
   async processRequest(messages, options = {}) {
     const systemPrompt = this._extractSystemPrompt(messages);
     const userMessage = this._extractLatestUserMessage(messages);
 
-    // ─── Step 1: Check if this is an internal utility request ─
-    const intercepted = this._tryIntercept(systemPrompt, userMessage);
-    if (intercepted !== null) {
-      return intercepted;
+    // Store available tools from the request
+    if (options.tools && options.tools.length > 0) {
+      this.currentTools = options.tools;
     }
 
-    // ─── Step 2: Real conversation — proceed to browser ───────
+    // ─── Step 1: Check interceptors ───────────────────────
+    const intercepted = this._tryIntercept(systemPrompt, userMessage);
+    if (intercepted !== null) {
+      return { kind: "text", content: intercepted };
+    }
+
+    // ─── Step 2: Real conversation via browser ────────────
     const conversationTurns = messages.filter((m) => m.role !== "system");
 
-    const needsNewChat = this._needsNewChat(systemPrompt, conversationTurns);
-
-    if (needsNewChat) {
+    if (this._needsNewChat(systemPrompt, conversationTurns)) {
       console.log("[Manager] Starting new browser chat session.");
       await this.browser.startNewChat();
       this.currentSystemPrompt = systemPrompt;
       this.systemPromptSent = false;
+      this.toolInstructionsSent = false;
       this.sentTurnCount = 0;
     }
 
-    // ─── Determine which messages are new ─────────────────
     const newTurns = conversationTurns.slice(this.sentTurnCount);
 
     if (newTurns.length === 0) {
       console.warn("[Manager] No new messages to send.");
-      return "[Bridge] No new user message found in the request.";
+      return { kind: "text", content: "[Bridge] No new user message found." };
     }
 
-    const latestUserMsg = newTurns[newTurns.length - 1];
-    const missedContext = newTurns.slice(0, -1);
+    // ─── Handle tool result messages ─────────────────────
+    // When OpenCode sends back tool results (role: "tool"), we need to
+    // format them and forward to the web LLM so it knows the outcome.
+    const formattedTurns = this._formatTurnsForBrowser(newTurns);
+
+    const latestTurn = formattedTurns[formattedTurns.length - 1];
+    const missedContext = formattedTurns.slice(0, -1);
 
     // ─── Build the composite prompt ──────────────────────
     let prompt = "";
@@ -180,19 +214,23 @@ class ConversationManager {
       this.systemPromptSent = true;
     }
 
-    if (missedContext.length > 0) {
-      console.log(
-        `[Manager] Injecting ${missedContext.length} missed context turn(s).`
-      );
-      prompt += META.contextSummary(missedContext);
+    // Inject tool instructions once per chat if tools are available
+    if (!this.toolInstructionsSent && config.tools.enabled && this.currentTools.length > 0) {
+      prompt += META.toolInstructions(this.currentTools);
+      this.toolInstructionsSent = true;
     }
 
-    prompt += latestUserMsg.content;
+    if (missedContext.length > 0) {
+      console.log(`[Manager] Injecting ${missedContext.length} missed context turn(s).`);
+      prompt += META.contextSummary(
+        missedContext.map((t) => ({ role: t.role, content: t.text }))
+      );
+    }
+
+    prompt += latestTurn.text;
 
     // ─── Send to browser and collect response ────────────
-    console.log(
-      `[Manager] Sending prompt (${prompt.length} chars) to browser...`
-    );
+    console.log(`[Manager] Sending prompt (${prompt.length} chars) to browser...`);
     let response = await this.browser.sendMessage(prompt);
 
     // ─── Auto-continue on truncation ─────────────────────
@@ -200,52 +238,101 @@ class ConversationManager {
     while (iteration < config.iteration.maxIterations) {
       const check = this._detectTruncation(response);
       if (!check.isTruncated) break;
-
       iteration++;
-      console.log(
-        `[Manager] Auto-continue #${iteration}: ${check.reason}`
-      );
-
-      const continuation = await this.browser.sendMessage(
-        META.continuePrompt
-      );
-
+      console.log(`[Manager] Auto-continue #${iteration}: ${check.reason}`);
+      const continuation = await this.browser.sendMessage(META.continuePrompt);
       response = this._mergeResponses(response, continuation);
     }
 
     this.sentTurnCount = conversationTurns.length;
 
-    console.log(
-      `[Manager] Done in ${iteration} turn(s), response: ${response.length} chars.`
-    );
+    console.log(`[Manager] Done in ${iteration} turn(s), response: ${response.length} chars.`);
 
-    return response;
+    // ─── Parse response for tool calls ───────────────────
+    if (config.tools.enabled) {
+      const result = this._parseToolCalls(response);
+      if (result.toolCalls.length > 0) {
+        console.log(`[Manager] Detected ${result.toolCalls.length} tool call(s) in response.`);
+        return {
+          kind: "tool_calls",
+          content: result.cleanText || null,
+          tool_calls: toOpenAIToolCalls(
+            result.toolCalls.slice(0, config.tools.maxToolCallsPerResponse)
+          ),
+        };
+      }
+    }
+
+    return { kind: "text", content: response };
+  }
+
+  // ─── Parse tool calls from LLM response ──────────────────
+  _parseToolCalls(responseText) {
+    // Extract file write blocks → convert to write tool calls
+    const fileBlocks = extractFileBlocks(responseText);
+    const fileToolCalls = fileBlocksToToolCalls(fileBlocks);
+
+    // Extract explicit tool call blocks
+    const explicitToolCalls = extractToolCallBlocks(responseText);
+
+    // Combine
+    const allToolCalls = [...fileToolCalls, ...explicitToolCalls];
+
+    // Strip markers from the text to get clean conversational content
+    const cleanText = stripAllMarkers(responseText);
+
+    return {
+      toolCalls: allToolCalls,
+      cleanText: cleanText || null,
+    };
+  }
+
+  // ─── Format turns for browser (handle tool results) ──────
+  _formatTurnsForBrowser(turns) {
+    return turns.map((turn) => {
+      if (turn.role === "tool") {
+        // Tool result from OpenCode — format as readable context
+        const toolName = turn.tool_call_id
+          ? `(tool_call_id: ${turn.tool_call_id})`
+          : "";
+        return {
+          role: "user",
+          text: `[Tool Result ${toolName}]:\n${turn.content}\n[/Tool Result]`,
+        };
+      }
+
+      if (turn.role === "assistant" && turn.tool_calls) {
+        // Assistant message that contained tool calls (echo back)
+        const callSummary = turn.tool_calls
+          .map((tc) => {
+            const fn = tc.function || {};
+            return `Called ${fn.name}(${fn.arguments || "{}"})`;
+          })
+          .join("\n");
+        return {
+          role: "assistant",
+          text: `[Previous tool invocations]:\n${callSummary}`,
+        };
+      }
+
+      return {
+        role: turn.role,
+        text: typeof turn.content === "string" ? turn.content : JSON.stringify(turn.content),
+      };
+    });
   }
 
   // ─── Interceptor Engine ──────────────────────────────────
-  /**
-   * Runs the request through all registered interceptors.
-   * Returns a string response if intercepted, or null if the
-   * request should be forwarded to the browser normally.
-   */
   _tryIntercept(systemPrompt, userMessage) {
     for (const interceptor of INTERCEPTORS) {
       if (interceptor.detect(systemPrompt, userMessage)) {
-        console.log(
-          `[Manager] Intercepted utility request: "${interceptor.name}" — handling locally.`
-        );
+        console.log(`[Manager] Intercepted: "${interceptor.name}"`);
         try {
           const result = interceptor.handle(systemPrompt, userMessage);
-          console.log(
-            `[Manager] Interceptor "${interceptor.name}" responded: "${result.substring(0, 80)}..."`
-          );
+          console.log(`[Manager] Interceptor responded: "${result.substring(0, 80)}..."`);
           return result;
         } catch (err) {
-          console.error(
-            `[Manager] Interceptor "${interceptor.name}" failed:`,
-            err.message
-          );
-          // Fall through to browser on failure
+          console.error(`[Manager] Interceptor "${interceptor.name}" failed:`, err.message);
           return null;
         }
       }
@@ -256,38 +343,36 @@ class ConversationManager {
   // ─── Truncation Detection ────────────────────────────────
   _detectTruncation(response) {
     const trimmed = response.trim();
-    if (trimmed.length === 0) {
-      return { isTruncated: false, reason: null };
-    }
+    if (trimmed.length === 0) return { isTruncated: false, reason: null };
 
     const codeBlockCount = (trimmed.match(/```/g) || []).length;
     if (codeBlockCount % 2 !== 0) {
       return { isTruncated: true, reason: "Unclosed code block" };
     }
 
+    // Check for unclosed [[WRITE_FILE:]] blocks
+    const writeStarts = (trimmed.match(/\[\[WRITE_FILE:/gi) || []).length;
+    const writeEnds = (trimmed.match(/\[\[END_FILE\]\]/gi) || []).length;
+    if (writeStarts > writeEnds) {
+      console.log(`${trimmed}`);
+      console.log(`[Manager] Detected ${writeStarts} [[WRITE_FILE:]] starts but only ${writeEnds} [[END_FILE]] ends.`);
+      return { isTruncated: true, reason: "Unclosed [[WRITE_FILE]] block" };
+    }
+
     const lower = trimmed.toLowerCase();
     const continuationSignals = [
-      "let me continue",
-      "i'll continue",
-      "continuing from",
-      "in the next part",
-      "to be continued",
-      "[continued]",
+      "let me continue", "i'll continue", "continuing from",
+      "in the next part", "to be continued", "[continued]",
       "i'll provide the rest",
     ];
     for (const signal of continuationSignals) {
       if (lower.includes(signal)) {
-        return {
-          isTruncated: true,
-          reason: `Continuation signal: "${signal}"`,
-        };
+        return { isTruncated: true, reason: `Continuation signal: "${signal}"` };
       }
     }
 
     const lastChar = trimmed.slice(-1);
-    const terminators = new Set([
-      ".", "!", "?", "`", '"', "'", ")", "]", "}", ">", "|", "-",
-    ]);
+    const terminators = new Set([".", "!", "?", "`", '"', "'", ")", "]", "}", ">", "|", "-"]);
     if (trimmed.length > 300 && !terminators.has(lastChar)) {
       return { isTruncated: true, reason: "Response ends mid-sentence" };
     }
@@ -307,21 +392,14 @@ class ConversationManager {
     if (overlapIdx >= 0 && overlapIdx < 50) {
       return trimmedOriginal + trimmedContinuation.slice(overlapIdx + 30);
     }
-
     return trimmedOriginal + "\n" + trimmedContinuation;
   }
 
   // ─── New Chat Detection ──────────────────────────────────
   _needsNewChat(systemPrompt, conversationTurns) {
-    if (this.sentTurnCount === 0 && !this.systemPromptSent) {
-      return true;
-    }
-    if (systemPrompt && systemPrompt !== this.currentSystemPrompt) {
-      return true;
-    }
-    if (conversationTurns.length < this.sentTurnCount) {
-      return true;
-    }
+    if (this.sentTurnCount === 0 && !this.systemPromptSent) return true;
+    if (systemPrompt && systemPrompt !== this.currentSystemPrompt) return true;
+    if (conversationTurns.length < this.sentTurnCount) return true;
     return false;
   }
 
@@ -333,15 +411,14 @@ class ConversationManager {
 
   _extractLatestUserMessage(messages) {
     const userMsgs = messages.filter((m) => m.role === "user");
-    return userMsgs.length > 0
-      ? userMsgs[userMsgs.length - 1].content
-      : "";
+    return userMsgs.length > 0 ? userMsgs[userMsgs.length - 1].content : "";
   }
 
   reset() {
     this.sentTurnCount = 0;
     this.currentSystemPrompt = null;
     this.systemPromptSent = false;
+    this.toolInstructionsSent = false;
   }
 }
 

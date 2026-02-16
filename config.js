@@ -1,47 +1,53 @@
 // config.js
 module.exports = {
-  // Bridge server settings
   server: {
     port: 5100,
     host: "127.0.0.1",
   },
 
-  // Target LLM chat web page
   target: {
-    url: "https://chatgpt.com",          // or https://claude.ai, etc.
-    type: "chatgpt",                      // chatgpt | claude | gemini | custom
-    headless: false,                      // set true once stable
-    userDataDir: "./browser-profile",     // persist login sessions
+    url: "https://chatgpt.com",
+    type: "chatgpt",
+    headless: false,
+    userDataDir: "./browser-profile",
   },
 
-  // Iteration control
   iteration: {
-    maxIterations: 20,                    // safety cap per request
-    responseStabilityTimeout: 3000,       // ms to wait for response to stop changing
-    pollInterval: 500,                    // ms between DOM polls
-    idleTimeout: 120000,                  // max wait for any single response (2 min)
+    maxIterations: 20,
+    responseStabilityTimeout: 3000,
+    pollInterval: 500,
+    idleTimeout: 120000,
   },
 
-  // Selectors for each supported LLM web page
+  // ─── Tool-call bridging ──────────────────────────────────
+  tools: {
+    enabled: true,
+    maxToolCallsPerResponse: 8,
+    // The safe marker format we instruct the web LLM to use
+    // instead of <file> tags (which break in HTML)
+    fileMarkerStart: "[[WRITE_FILE:",   // e.g. [[WRITE_FILE: src/index.js]]
+    fileMarkerEnd: "[[END_FILE]]",
+    toolCallMarkerStart: "[[TOOL_CALL]]",
+    toolCallMarkerEnd: "[[/TOOL_CALL]]",
+  },
+
   selectors: {
     chatgpt: {
-      textArea:     '#prompt-textarea > p',
-      sendButton:   'button[data-testid="send-button"]',
-      responseBlock:'div[data-message-author-role="assistant"]',
-      stopButton:   'button[aria-label="Stop generating"]',
+      textArea: '#prompt-textarea > p',
+      sendButton: 'button[data-testid="send-button"]',
+      responseBlock: 'div[data-message-author-role="assistant"]',
+      stopButton: 'button[aria-label="Stop generating"]',
       thinkingIndicator: '.result-streaming',
-
       textdocPopover: 'div[id^="textdoc-message-"]',
-      textdocContent: 'div.ProseMirror', // inside popover
-      textdocTitle: 'span.text-token-text-primary.font-semibold', // "Agents" in your sample (optional)
+      textdocContent: 'div.ProseMirror',
+      textdocTitle: 'span.text-token-text-primary.font-semibold',
     },
     claude: {
-      textArea:     'div.ProseMirror[contenteditable="true"]',
-      sendButton:   'button[aria-label="Send Message"]',
-      responseBlock:'div[data-is-streaming],.font-claude-message',
-      stopButton:   'button[aria-label="Stop Response"]',
+      textArea: 'div.ProseMirror[contenteditable="true"]',
+      sendButton: 'button[aria-label="Send Message"]',
+      responseBlock: 'div[data-is-streaming],.font-claude-message',
+      stopButton: 'button[aria-label="Stop Response"]',
       thinkingIndicator: '[data-is-streaming="true"]',
     },
-    // Add more targets as needed
   },
 };
