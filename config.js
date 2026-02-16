@@ -30,6 +30,10 @@ module.exports = {
       responseBlock:'div[data-message-author-role="assistant"]',
       stopButton:   'button[aria-label="Stop generating"]',
       thinkingIndicator: '.result-streaming',
+
+      textdocPopover: 'div[id^="textdoc-message-"]',
+      textdocContent: 'div.ProseMirror', // inside popover
+      textdocTitle: 'span.text-token-text-primary.font-semibold', // "Agents" in your sample (optional)
     },
     claude: {
       textArea:     'div.ProseMirror[contenteditable="true"]',
