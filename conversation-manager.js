@@ -1,5 +1,7 @@
 // conversation-manager.js
 "use strict";
+const { PromptManager } = require('./prompt-manager');
+const { estimateTokens }  = require('./prompt-manager'); // re-export helper (optional)
 
 const config = require("./config");
 const {
@@ -152,9 +154,24 @@ class ConversationManager {
     this.browser = browserController;
     this.sentTurnCount = 0;
     this.currentSystemPrompt = null;
-    this.systemPromptSent = false;
     this.currentTools = [];          // Tools from latest request
-    this.toolInstructionsSent = false;
+    this.promptManager = new PromptManager({
+      targetModel: config.target?.model,
+      charLimit: config.promptLimits?.charLimit,
+      llamaEndpoint: config.llama?.endpoint,
+      llamaModel: config.llama?.model,
+      strategy: config.promptLimits?.strategy || 'auto',
+      logger: this.log || console,
+      // ── Wire in META templates so PromptManager owns the full prompt ──
+      templates: {
+        systemWrapper:    META.systemWrapper,
+        contextSummary:   META.contextSummary,
+        continuePrompt:   META.continuePrompt,
+        toolInstructions: META.toolInstructions,
+      },
+      maxContinuations: config.iteration?.maxIterations ?? 5,
+    });
+    
   }
 
   /**
@@ -181,14 +198,14 @@ class ConversationManager {
 
     // ─── Step 2: Real conversation via browser ────────────
     const conversationTurns = messages.filter((m) => m.role !== "system");
-
-    if (this._needsNewChat(systemPrompt, conversationTurns)) {
+    const needsNew = this._needsNewChat(systemPrompt, conversationTurns);
+    if (needsNew) {
       console.log("[Manager] Starting new browser chat session.");
       await this.browser.startNewChat();
       this.currentSystemPrompt = systemPrompt;
-      this.systemPromptSent = false;
-      this.toolInstructionsSent = false;
       this.sentTurnCount = 0;
+      // Reset PromptManager state for the new session
+      this.promptManager.resetSession();
     }
 
     const newTurns = conversationTurns.slice(this.sentTurnCount);
@@ -203,50 +220,25 @@ class ConversationManager {
     // format them and forward to the web LLM so it knows the outcome.
     const formattedTurns = this._formatTurnsForBrowser(newTurns);
 
-    const latestTurn = formattedTurns[formattedTurns.length - 1];
-    const missedContext = formattedTurns.slice(0, -1);
+    // ─── Delegate prompt assembly to PromptManager ───────
+    const prompt = await this.promptManager.buildPrompt({
+      systemPrompt:  this.currentSystemPrompt,
+      tools:         config.tools.enabled ? this.currentTools : [],
+      formattedTurns,
+    });
 
-    // ─── Build the composite prompt ──────────────────────
-    let prompt = "";
-
-    if (!this.systemPromptSent && this.currentSystemPrompt) {
-      prompt += META.systemWrapper(this.currentSystemPrompt);
-      this.systemPromptSent = true;
-    }
-
-    // Inject tool instructions once per chat if tools are available
-    if (!this.toolInstructionsSent && config.tools.enabled && this.currentTools.length > 0) {
-      prompt += META.toolInstructions(this.currentTools);
-      this.toolInstructionsSent = true;
-    }
-
-    if (missedContext.length > 0) {
-      console.log(`[Manager] Injecting ${missedContext.length} missed context turn(s).`);
-      prompt += META.contextSummary(
-        missedContext.map((t) => ({ role: t.role, content: t.text }))
-      );
-    }
-
-    prompt += latestTurn.text;
+    console.log(
+      `[Manager] PromptManager produced prompt ` +
+      `(${prompt.length} chars, ~${estimateTokens ? estimateTokens(prompt) : '?'} tokens)`
+    );
 
     // ─── Send to browser and collect response ────────────
-    console.log(`[Manager] Sending prompt (${prompt.length} chars) to browser...`);
     let response = await this.browser.sendMessage(prompt);
 
-    // ─── Auto-continue on truncation ─────────────────────
-    let iteration = 1;
-    while (iteration < config.iteration.maxIterations) {
-      const check = this._detectTruncation(response);
-      if (!check.isTruncated) break;
-      iteration++;
-      console.log(`[Manager] Auto-continue #${iteration}: ${check.reason}`);
-      const continuation = await this.browser.sendMessage(META.continuePrompt);
-      response = this._mergeResponses(response, continuation);
-    }
+    // ─── Auto-continue on truncation (via PromptManager) ─
+    response = await this._autoContinue(response);
 
     this.sentTurnCount = conversationTurns.length;
-
-    console.log(`[Manager] Done in ${iteration} turn(s), response: ${response.length} chars.`);
 
     // ─── Parse response for tool calls ───────────────────
     if (config.tools.enabled) {
@@ -264,6 +256,37 @@ class ConversationManager {
     }
 
     return { kind: "text", content: response };
+  }
+
+   // ─── Auto-continue loop (delegates prompts to PromptManager) ─
+  async _autoContinue(response) {
+    const maxIter = config.iteration?.maxIterations ?? 5;
+    let iteration = 1;
+
+    while (iteration < maxIter) {
+      const check = this._detectTruncation(response);
+      if (!check.isTruncated) break;
+
+      iteration++;
+      console.log(`[Manager] Auto-continue #${iteration}: ${check.reason}`);
+
+      // Let PromptManager produce the continuation prompt
+      // (it may wrap with additional context if the model needs it)
+      const continueText = this.promptManager.getContinuePrompt({
+        iterationNumber: iteration,
+        truncationReason: check.reason,
+        tailChars: response.slice(-200),   // give PM context about where we stopped
+      });
+
+      const continuation = await this.browser.sendMessage(continueText);
+      response = this._mergeResponses(response, continuation);
+    }
+
+    console.log(
+      `[Manager] Done in ${iteration} turn(s), response: ${response.length} chars.`
+    );
+
+    return response;
   }
 
   // ─── Parse tool calls from LLM response ──────────────────
@@ -498,8 +521,7 @@ class ConversationManager {
   reset() {
     this.sentTurnCount = 0;
     this.currentSystemPrompt = null;
-    this.systemPromptSent = false;
-    this.toolInstructionsSent = false;
+    this.promptManager.resetSession();
   }
 }
 

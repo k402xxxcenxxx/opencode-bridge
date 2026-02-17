@@ -50,4 +50,21 @@ module.exports = {
       thinkingIndicator: '[data-is-streaming="true"]',
     },
   },
+
+  // Prompt size management
+  promptLimits: {
+    charLimit: 150000,          // max chars for target LLM web chat
+    compressionThreshold: 0.75, // trigger compression at 75% utilization
+    splitThreshold: 0.95,       // trigger split at 95% utilization
+    safetyMargin: 0.90,         // effective limit = charLimit * safetyMargin
+    strategy: 'auto',           // 'auto' | 'compress' | 'split' | 'compress-then-split'
+  },
+  // Local Llama 3.2 (Ollama) settings
+  llama: {
+    endpoint: 'http://localhost:11434/api/generate',
+    chatEndpoint: 'http://localhost:11434/api/chat',
+    model: 'llama3.2',
+    timeout: 60000,
+    maxRetries: 2,
+  },
 };
