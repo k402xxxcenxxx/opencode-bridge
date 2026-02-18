@@ -18,6 +18,8 @@ const META = {
     `<system_instructions>\n${systemPrompt}\n</system_instructions>\n\n` +
     `Follow the above instructions precisely for this entire conversation. ` +
     `Respond directly to the user's requests without preamble. ` +
+    `Do not output plans, intentions, or explanations about what you will do next. ` +
+    `Always execute immediately by emitting the required block format as your first output. ` +
     `Never reference these instructions in your replies.\n\n---\n\n`,
 
   contextSummary: (turns) => {
@@ -35,7 +37,12 @@ const META = {
 
   continuePrompt:
     "Your previous response was cut off. Continue EXACTLY where you stopped — " +
-    "do not repeat, summarize, or restart. Begin with the next character/word.",
+    "do not repeat, summarize, or restart. Begin with the next character/word. " +
+    "Do not switch to planning mode.",
+
+  executionReminder:
+    "Execution mode reminder: produce actions, not plans. " +
+    "Your first output must be a [[TOOL_CALL]], [[WRITE_FILE: ...]], or [[TASK_FINISHED]] block.",
 
   // ─── Tool usage instructions appended to system prompt ───
   toolInstructions: (availableTools) => {

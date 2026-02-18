@@ -64,6 +64,7 @@ class PromptManager {
    * @param {Function} opts.templates.contextSummary
    * @param {Function} opts.templates.continuePrompt
    * @param {Function} opts.templates.toolInstructions
+   * @param {string|Function} [opts.templates.executionReminder]
    * @param {number}  [opts.maxContinuations=5]
    */
   constructor(opts = {}) {
@@ -82,6 +83,7 @@ class PromptManager {
       contextSummary:   opts.templates?.contextSummary   || ((turns) => ""),
       continuePrompt:   opts.templates?.continuePrompt   || "Please continue.",
       toolInstructions: opts.templates?.toolInstructions  || ((_tools) => ""),
+      executionReminder: opts.templates?.executionReminder || "",
     };
 
     // ── Budget ──────────────────────────────────────────
@@ -168,10 +170,21 @@ class PromptManager {
       }
     }
 
-    // ── 4. Latest user turn (always last) ───────────────
+    // ── 4. Execution reminder (every prompt, close to user turn) ──
+    const reminder = typeof this.templates.executionReminder === "function"
+      ? this.templates.executionReminder()
+      : this.templates.executionReminder;
+
+    if (reminder) {
+      const reminderBlock = `<execution_reminder>\n${reminder}\n</execution_reminder>`;
+      parts.push({ tag: "reminder", text: reminderBlock });
+      reservedChars += reminderBlock.length;
+    }
+
+    // ── 5. Latest user turn (always last) ───────────────
     parts.push({ tag: "user", text: latestText });
 
-    // ── 5. Concatenate & final budget guard ─────────────
+    // ── 6. Concatenate & final budget guard ─────────────
     let prompt = parts.map((p) => p.text).join("\n\n");
 
     if (this.charBudget < Infinity && prompt.length > this.charBudget) {
@@ -185,7 +198,9 @@ class PromptManager {
       `[PromptManager] Prompt ready — ${prompt.length} chars, ~${estimateTokens(prompt)} tokens.`
     );
 
-    const kickSuffix = "\n\nBegin now. Your first output must contain a [[TOOL_CALL]] or [[WRITE_FILE:]] or [[TASK_FINISHED]] block.";
+    const kickSuffix =
+      "\n\nBegin now. No planning prose. Your first output must contain a " +
+      "[[TOOL_CALL]], [[WRITE_FILE: ...]], or [[TASK_FINISHED]] block.";
     prompt += kickSuffix;
 
     return prompt;
