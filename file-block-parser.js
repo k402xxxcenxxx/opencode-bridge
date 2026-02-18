@@ -1,8 +1,6 @@
 // file-block-parser.js
 "use strict";
 
-const config = require("./config");
-
 // ─── Safe marker format (primary) ──────────────────────────
 // [[WRITE_FILE: path/to/file.js]]
 // ...content...
@@ -34,7 +32,7 @@ function extractFileBlocks(text) {
   while ((m = safeRe.exec(text)) !== null) {
     blocks.push({
       filePath: m[1].trim(),
-      content: m[2],  // preserve content exactly
+      content: m[2], // preserve content exactly
     });
   }
 
@@ -114,11 +112,12 @@ function extractToolCallBlocks(text) {
  */
 function stripAllMarkers(text) {
   if (!text) return "";
+
   return text
-    .replace(/$$\[WRITE_FILE:\s*.+?$$\]\s*\n[\s\S]*?\n?\s*$$\[END_FILE$$\]/gi, "")
+    .replace(/\[\[WRITE_FILE:\s*.+?\]\]\s*\n[\s\S]*?\n?\s*\[\[END_FILE\]\]/gi, "")
     .replace(/```write:[^\n]+\n[\s\S]*?```/gi, "")
     .replace(/<file\s+path=["'][^"']+["']>[\s\S]*?<\/file>/gi, "")
-    .replace(/$$\[TOOL_CALL$$\]\s*\n?[\s\S]*?\n?\s*$$\[\/TOOL_CALL$$\]/gi, "")
+    .replace(/\[\[TOOL_CALL\]\]\s*\n?[\s\S]*?\n?\s*\[\[\/TOOL_CALL\]\]/gi, "")
     .replace(/```tool_call\s*\n[\s\S]*?```/gi, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -146,9 +145,7 @@ function toOpenAIToolCalls(toolCalls) {
     type: "function",
     function: {
       name: tc.name,
-      arguments: typeof tc.arguments === "string"
-        ? tc.arguments
-        : JSON.stringify(tc.arguments),
+      arguments: typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments),
     },
   }));
 }
