@@ -172,7 +172,7 @@ class PromptManager {
     parts.push({ tag: "user", text: latestText });
 
     // ── 5. Concatenate & final budget guard ─────────────
-    let prompt = parts.map((p) => p.text).join("");
+    let prompt = parts.map((p) => p.text).join("\n\n");
 
     if (this.charBudget < Infinity && prompt.length > this.charBudget) {
       this.log.log?.(
@@ -184,6 +184,9 @@ class PromptManager {
     this.log.log?.(
       `[PromptManager] Prompt ready — ${prompt.length} chars, ~${estimateTokens(prompt)} tokens.`
     );
+
+    const kickSuffix = "\n\nBegin now. Your first output must contain a [[TOOL_CALL]] or [[WRITE_FILE:]] or [[TASK_FINISHED]] block.";
+    prompt += kickSuffix;
 
     return prompt;
   }

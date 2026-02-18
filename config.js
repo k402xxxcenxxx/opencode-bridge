@@ -13,7 +13,7 @@ module.exports = {
   },
 
   iteration: {
-    maxIterations: 20,
+    maxIterations: 2,
     responseStabilityTimeout: 3000,
     pollInterval: 500,
     idleTimeout: 120000,

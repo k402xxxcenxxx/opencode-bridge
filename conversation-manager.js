@@ -40,36 +40,19 @@ const META = {
   // ─── Tool usage instructions appended to system prompt ───
   toolInstructions: (availableTools) => {
     if (!availableTools || availableTools.length === 0) return "";
-
     const toolList = availableTools.map((t) => {
       const fn = t.function || t;
       const params = fn.parameters
         ? JSON.stringify(fn.parameters, null, 2)
         : "{}";
-      return `- **${fn.name}**: ${fn.description || "No description"}\n  Parameters: ${params}`;
+      // return `- **${fn.name}**: ${fn.description || "No description"}\n  Parameters: ${params}`;
+      return `- **${fn.name}**\n  Parameters: ${params}`;
     }).join("\n");
-
     return (
       `\n\n---\n` +
-      `IMPORTANT — FILE AND TOOL OUTPUT FORMAT:\n` +
-      `You have access to the following tools. When you need to use them, ` +
-      `output the tool invocation using the EXACT formats below.\n\n` +
-      `DO NOT use <file> or </file> HTML-style tags — they break in this environment.\n\n` +
-      `**To write/create a file**, use this format (double square brackets, NOT angle brackets):\n\n` +
-      `[[WRITE_FILE: path/to/filename.ext]]\n` +
-      `file content here exactly as it should be saved\n` +
-      `[[END_FILE]]\n\n` +
-      `**To invoke any other tool**, use this format:\n\n` +
-      `[[TOOL_CALL]]\n` +
-      `{"name": "tool_name", "arguments": {"param": "value"}}\n` +
-      `[[/TOOL_CALL]]\n\n` +
-      `Available tools:\n${toolList}\n\n` +
-      `RULES:\n` +
-      `1. Always use [[WRITE_FILE: ...]] / [[END_FILE]] for file creation — NEVER <file> tags.\n` +
-      `2. Always use [[TOOL_CALL]] / [[/TOOL_CALL]] for other tool invocations.\n` +
-      `3. File content must be COMPLETE — no placeholders, no truncation, no "// rest of code".\n` +
-      `4. You may include normal conversational text alongside tool blocks.\n` +
-      `5. Multiple file writes in one response are fine.\n` +
+      // `AVAILABLE TOOLS FOR THIS SESSION:\n${toolList}\n` +
+      `AVAILABLE TOOLS FOR THIS SESSION:\n` +
+      `Use the [[TOOL_CALL]] / [[WRITE_FILE:]] formats described in your system instructions.\n` +
       `---\n\n`
     );
   },
@@ -108,26 +91,26 @@ const INTERCEPTORS = [
       return title.charAt(0).toUpperCase() + title.slice(1);
     },
   },
-  {
-    name: "summarization",
-    detect: (systemPrompt, _userMessage) => {
-      if (!systemPrompt) return false;
-      const lower = systemPrompt.toLowerCase();
-      return (
-        (lower.includes("summarize") || lower.includes("summary")) &&
-        (lower.includes("conversation") || lower.includes("thread")) &&
-        lower.includes("brief") &&
-        !lower.includes("assist") &&
-        !lower.includes("help")
-      );
-    },
-    handle: (_systemPrompt, userMessage) => {
-      const text = userMessage.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-      const sentences = text.split(/[.!?]+/).filter((s) => s.trim().length > 5);
-      if (sentences.length === 0) return "General conversation.";
-      return sentences.slice(0, 3).join(". ").trim() + ".";
-    },
-  },
+  // {
+  //   name: "summarization",
+  //   detect: (systemPrompt, _userMessage) => {
+  //     if (!systemPrompt) return false;
+  //     const lower = systemPrompt.toLowerCase();
+  //     return (
+  //       (lower.includes("summarize") || lower.includes("summary")) &&
+  //       (lower.includes("conversation") || lower.includes("thread")) &&
+  //       lower.includes("brief") &&
+  //       !lower.includes("assist") &&
+  //       !lower.includes("help")
+  //     );
+  //   },
+  //   handle: (_systemPrompt, userMessage) => {
+  //     const text = userMessage.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  //     const sentences = text.split(/[.!?]+/).filter((s) => s.trim().length > 5);
+  //     if (sentences.length === 0) return "General conversation.";
+  //     return sentences.slice(0, 3).join(". ").trim() + ".";
+  //   },
+  // },
   {
     name: "commit-message",
     detect: (systemPrompt, _userMessage) => {
@@ -182,6 +165,7 @@ class ConversationManager {
    * @returns {Object} { kind, content, tool_calls } — bridge-server uses `kind` to decide response format
    */
   async processRequest(messages, options = {}) {
+    console.log(messages);
     const systemPrompt = this._extractSystemPrompt(messages);
     const userMessage = this._extractLatestUserMessage(messages);
 
